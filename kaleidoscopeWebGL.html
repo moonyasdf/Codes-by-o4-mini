@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Animación Kaleidoscópica WebGL</title>
+  <style>
+    body { margin:0; overflow:hidden; }
+    canvas { display:block; }
+  </style>
+</head>
+<body>
+  <canvas id="glcanvas"></canvas>
+
+  <!-- Vertex Shader -->
+  <script id="vertex-shader" type="x-shader/x-vertex">
+    attribute vec2 a_position;
+    void main(){
+      gl_Position = vec4(a_position, 0.0, 1.0);
+    }
+  </script>
+
+  <!-- Fragment Shader -->
+  <script id="fragment-shader" type="x-shader/x-fragment">
+    precision highp float;
+    uniform vec2 u_resolution;
+    uniform float u_time;
+    #define PI 3.141592653589793
+    #define MAX_STEPS 100
+    #define MAX_DIST 100.0
+    #define SURF_DIST 0.001
+    
+    vec3 palette(float t){
+      return 0.5 + 0.5*cos(2.0*PI*(t + vec3(0.00,0.33,0.67))
+                       + vec3(0.0,0.5,1.0));
+    }
+    
+    // Mandelbulb distance estimator
+    float mandelbulbDE(vec3 pos) {
+      vec3 z = pos;
+      float dr = 1.0;
+      float r = 0.0;
+      for(int i=0;i<8;i++){
+        r = length(z);
+        if(r>4.0) break;
+        // coordenadas esféricas
+        float theta = acos(z.z/r);
+        float phi   = atan(z.y, z.x);
+        dr = pow(r,7.0)*8.0*dr + 1.0;
+        float zr = pow(r,8.0);
+        theta *= 8.0;
+        phi   *= 8.0;
+        z = zr * vec3(
+          sin(theta)*cos(phi),
+          sin(phi)*sin(theta),
+          cos(theta)
+        );
+        z += pos;
+      }
+      return 0.5 * log(r) * r / dr;
+    }
+    
+    float sceneSDF(vec3 p){
+      return mandelbulbDE(p);
+    }
+    
+    float rayMarch(vec3 ro, vec3 rd){
+      float dO = 0.0;
+      for(int i=0;i<MAX_STEPS;i++){
+        vec3 pos = ro + rd * dO;
+        float ds = sceneSDF(pos);
+        if(ds < SURF_DIST) return dO;
+        dO += ds * 0.5;
+        if(dO > MAX_DIST) break;
+      }
+      return -1.0;
+    }
+    
+    vec3 getNormal(vec3 p){
+      float e = 0.0005;
+      return normalize(vec3(
+        sceneSDF(p+vec3(e,0,0)) - sceneSDF(p-vec3(e,0,0)),
+        sceneSDF(p+vec3(0,e,0)) - sceneSDF(p-vec3(0,e,0)),
+        sceneSDF(p+vec3(0,0,e)) - sceneSDF(p-vec3(0,0,e))
+      ));
+    }
+    
+    void main(){
+      vec2 uv = (gl_FragCoord.xy / u_resolution) * 2.0 - 1.0;
+      uv.x *= u_resolution.x / u_resolution.y;
+    
+      // Soft kaleidoscope
+      float k = 6.0;
+      float ang = atan(uv.y, uv.x);
+      float rad = length(uv);
+      ang = mod(ang, 2.0*PI/k);
+      uv = vec2(cos(ang), sin(ang)) * rad;
+    
+      // cámara + rotación
+      vec3 ro = vec3(0.0, 0.0, 4.0);
+      vec3 rd = normalize(vec3(uv, -1.5));
+      float ca = u_time * 0.1;
+      mat2 rot = mat2(cos(ca), -sin(ca), sin(ca), cos(ca));
+      ro.xz = rot * ro.xz;
+      rd.xz = rot * rd.xz;
+    
+      float t = rayMarch(ro, rd);
+      vec3 col = vec3(0.0);
+      if(t > 0.0){
+        vec3 pos = ro + rd * t;
+        vec3 n   = getNormal(pos);
+        float diff = clamp(dot(n, normalize(vec3(0.5,1.0,0.2))), 0.0, 1.0);
+        col = palette(diff + u_time * 0.05);
+      }
+    
+      // x‑ray + gamma
+      col = mix(col*0.1, col, smoothstep(0.0,1.0,length(col)));
+      col = pow(col, vec3(0.4545));
+      gl_FragColor = vec4(col, 1.0);
+    }
+    </script>
+
+  <script>
+    (function(){
+      const canvas = document.getElementById('glcanvas');
+      const gl = canvas.getContext('webgl');
+      if(!gl){ alert('WebGL no soportado'); return; }
+
+      // Redimensionar
+      function resize(){
+        canvas.width = innerWidth;
+        canvas.height = innerHeight;
+        gl.viewport(0,0,canvas.width, canvas.height);
+      }
+      window.addEventListener('resize', resize);
+      resize();
+
+      // Compila shader
+      function compile(id, type){
+        const src = document.getElementById(id).text;
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src);
+        gl.compileShader(s);
+        if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)){
+          console.error(gl.getShaderInfoLog(s));
+          gl.deleteShader(s);
+          return null;
+        }
+        return s;
+      }
+
+      const vs = compile('vertex-shader', gl.VERTEX_SHADER);
+      const fs = compile('fragment-shader', gl.FRAGMENT_SHADER);
+      const prog = gl.createProgram();
+      gl.attachShader(prog, vs);
+      gl.attachShader(prog, fs);
+      gl.linkProgram(prog);
+      if(!gl.getProgramParameter(prog, gl.LINK_STATUS)){
+        console.error(gl.getProgramInfoLog(prog));
+      }
+      gl.useProgram(prog);
+
+      // Buffer quad
+      const posLoc  = gl.getAttribLocation(prog, 'a_position');
+      const resLoc  = gl.getUniformLocation(prog, 'u_resolution');
+      const timeLoc = gl.getUniformLocation(prog, 'u_time');
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+        -1,-1,  1,-1,  -1,1,
+        -1,1,   1,-1,   1,1
+      ]), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(posLoc);
+      gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+      // Render loop
+      let start = Date.now();
+      (function render(){
+        let t = (Date.now() - start)*0.001;
+        gl.uniform2f(resLoc, canvas.width, canvas.height);
+        gl.uniform1f(timeLoc, t);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        requestAnimationFrame(render);
+      })();
+    })();
+  </script>
+</body>
+</html>
